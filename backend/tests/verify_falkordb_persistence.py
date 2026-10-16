@@ -54,10 +54,8 @@ def verify_full_persistence():
     result = graph.query(create_cypher, params)
     print(f"Write successful! Created node: {result.result_set}")
 
-    # Flush snapshot to volume
-    r = redis.Redis(host=host, port=port)
-    r.save()
-    print("Executed Redis SAVE to flush database snapshot to persistent volume.")
+    # NO MANUAL SAVE CALLED HERE. Relying entirely on container's AOF / RDB persistence on restart!
+    print("NO manual SAVE called. Relying strictly on container persistence (--appendonly yes, graceful SIGTERM save).")
 
     print(f"\n=================================================================")
     print(f"STEP 3: Restarting Docker container '{container_name}'")

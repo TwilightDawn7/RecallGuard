@@ -53,4 +53,35 @@ This log documents all architectural decisions, trade-offs, and resolutions wher
 - **Decision:**
   - Mount persistent volume to `/var/lib/falkordb/data`.
   - Pass `REDIS_ARGS=--save 60 1 --appendonly yes` to enable both periodic RDB snapshots and AOF journaling.
+  - Verified persistence without manual `SAVE` across container restart; data durability is guaranteed via automatic AOF and Redis graceful shutdown on `SIGTERM`.
 - **Rationale:** Guarantees durability across container restarts, stops, and rebuilds while maintaining low-latency in-memory query performance.
+
+---
+
+### ADR-006: Asymmetric Contradiction & Tier Protection
+- **Date:** 2026-10-16
+- **Context:** Low-trust agents or untrusted sources should not be able to disrupt or dispute claims asserted by authoritative or verified sources.
+- **Decision:**
+  - When claims conflict on value for the same `(subject, predicate)` without valid supersession:
+    - If tiers differ: Create edge `(lower_tier_claim)-[:CONTRADICTS]->(higher_tier_claim)`. Mark ONLY the lower-tier claim as `disputed`. The higher-tier claim remains `active`.
+    - If tiers are equal: Mark BOTH claims as `disputed`. Edge created `(new_claim)-[:CONTRADICTS]->(existing_claim)`.
+- **Rationale:** A low-trust claim must never compromise an authoritative claim's active status.
+
+---
+
+### ADR-007: Multi-Hop Supersession Traversal (`SUPERSEDES*1..5`)
+- **Date:** 2026-10-16
+- **Context:** Claims may undergo multiple successive revisions (e.g. c1 -> c2 -> c3).
+- **Decision:**
+  - Verification Rule 4 traces multi-hop supersession `MATCH (head:Claim)-[:SUPERSEDES*1..5]->(old:Claim)` where `head.status = 'active'`. If the requested value matches an old superseded claim and its ultimate active head is trusted, rule 4 blocks with `REQUESTED_VALUE_SUPERSEDED`.
+- **Rationale:** Prevents agents from acting on stale historical claims even when revisions occur across multiple sessions.
+
+---
+
+### ADR-008: Disputed Verified Claims Safety Check (Policy Rule 5)
+- **Date:** 2026-10-16
+- **Context:** If a verified claim has been contested by an equal or higher tier source, relying on it without superior governing authority is unsafe.
+- **Decision:**
+  - Before checking general trust availability, if any disputed claim with tier >= `verified` exists for the `(subject, predicate)` and no untainted trusted claim strictly outranks it, the policy immediately fails closed: `ABSTAIN` with `UNRESOLVED_CONFLICT`.
+- **Rationale:** Maintains fail-closed safety when high-trust claims are actively disputed.
+

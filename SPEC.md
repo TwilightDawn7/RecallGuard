@@ -45,7 +45,7 @@ Nodes (all have a stable string `id`):
 Claim `status` values:
 - `active`: not superseded, not disputed.
 - `superseded`: has an incoming `SUPERSEDES` edge.
-- `disputed`: conflicts with a claim it could not legitimately supersede.
+- `disputed`: conflicts with another claim and was not legitimately resolved. Only the lower-tier claim of a conflicting pair is disputed; if tiers are equal, both are. A lower-tier claim can never dispute a higher-tier one.
 
 Relationships:
 
@@ -54,7 +54,7 @@ Relationships:
 | `(Source)-[:ASSERTED]->(Claim)` | who stated it |
 | `(Session)-[:PRODUCED]->(Claim)` | which session ingested it |
 | `(Claim)-[:SUPERSEDES {at, by_source}]->(Claim)` | explicit, authorized replacement |
-| `(Claim)-[:CONTRADICTS]->(Claim)` | incompatible values, no valid supersession |
+| `(Claim)-[:CONTRADICTS]->(Claim)` | incompatible values, no valid supersession. Direction: lower-tier claim points to higher-tier claim; for equal tiers, newer points to older |
 | `(Claim)-[:DERIVED_FROM]->(Claim)` | this claim was built from that one |
 | `(Decision)-[:RELIED_ON {role}]->(Claim)` | claim used as evidence (`governing`, `historical`, `challenging`) |
 
@@ -62,7 +62,7 @@ Normalization: `subject` and `predicate` are lowercased, trimmed, whitespace to 
 
 Trust tiers (numeric rank): `authoritative`=3, `verified`=2, `agent`=1, `unknown`=0.
 
-Idempotency: `source_claim_key` = hash of (source_id, subject, predicate, object). Ingest with `MERGE` on it so repeated ingestion creates no duplicate. Add indexes on `Claim.id`, `Claim.subject`, `Source.id`, `Decision.id` (verify index syntax for the installed version; try constraints for uniqueness if supported).
+Idempotency: `source_claim_key` = hash of (source_id, subject, predicate, object). Ingest with `MERGE` on it so repeated ingestion creates no duplicate. Add a unique constraint on `Claim.id` and on `Claim.source_claim_key` (repeated ingestion must not create duplicates). Add indexes on `Claim.id`, `Claim.subject`, `Source.id`, `Decision.id` (verify index syntax for the installed version; try constraints for uniqueness if supported).
 
 ## 3. Ingestion rules
 
@@ -75,11 +75,14 @@ Idempotency: `source_claim_key` = hash of (source_id, subject, predicate, object
    - old claim has the same subject and predicate,
    - new source tier >= `verified`,
    - new source tier >= tier of the old claim's source.
-   Otherwise create `CONTRADICTS`, mark both `disputed`, and report `supersession_rejected: reason` in the response.
-5. If no `supersedes_claim_id` is given and an active claim with the same subject and predicate has a different object, create `CONTRADICTS` and mark both `disputed`. **Never infer supersession from timestamps.**
+   Otherwise the supersession is **rejected**: apply the contradiction rule in step 5 to the pair (new claim vs. the claim it tried to replace) and report `supersession_rejected: reason` in the response.
+5. Contradiction rule. If a new claim has the same subject and predicate as an existing non-superseded claim but a different object, and no accepted supersession covers it, create `CONTRADICTS` and set status:
+   - tiers differ: mark **only the lower-tier** claim `disputed`; the edge points lower to higher. The higher-tier claim keeps its status.
+   - tiers equal: mark **both** `disputed`.
+   **Never infer supersession from timestamps.**
 6. Response includes the ids of everything created, plus `blast_radius` if a supersession happened (section 5).
 
-## 4. Verification policy (version `1.0`)
+## 4. Verification policy (version `1.1`)
 
 Input: `action_type`, `subject`, `predicate`, `requested_value`, `session_id`.
 
@@ -88,7 +91,9 @@ Retrieve with Cypher: all claims for (subject, predicate), with source, superses
 Definitions:
 - **Trusted claim:** status `active`, source tier >= `verified`, and not tainted.
 - **Tainted:** any `DERIVED_FROM*1..5` ancestor has status `superseded`.
-- **Governing value:** see rule 6 below.
+- **Contested:** a `disputed` claim with source tier >= `verified`, unless some trusted claim has a strictly higher tier than it.
+- **Chain head:** following `SUPERSEDES*1..5` forward from a superseded claim to the claim that is not itself superseded.
+- **Governing value:** the single value at the top tier among trusted claims.
 
 Rules, evaluated in order. First match wins:
 
@@ -96,16 +101,21 @@ Rules, evaluated in order. First match wins:
 |---|---|---|---|
 | 1 | Graph query fails or times out | ABSTAIN | `GRAPH_UNAVAILABLE` |
 | 2 | No claims for (subject, predicate) | ABSTAIN | `NO_EVIDENCE` |
-| 3 | A claim equal to the requested value exists, is tainted, and no trusted claim equals it | BLOCK | `STALE_DEPENDENCY` |
-| 4 | Requested value equals a `superseded` claim's object, and its superseder is trusted | BLOCK | `REQUESTED_VALUE_SUPERSEDED` |
-| 5 | No trusted claims exist (only `agent`/`unknown` sources, or all disputed) | ABSTAIN | `INSUFFICIENT_TRUST` |
-| 6 | Trusted claims disagree on value and the highest tier among them is not `authoritative` or has more than one distinct value at that tier | ABSTAIN | `UNRESOLVED_CONFLICT` |
-| 7 | Governing value (the single value at the top tier, or the only trusted value) differs from the requested value | BLOCK | `REQUESTED_VALUE_CONFLICTS_CURRENT` |
-| 8 | Governing value equals the requested value | ALLOW | `MATCHES_CURRENT_EVIDENCE` |
+| 3 | A claim equal to the requested value exists, is tainted, and no trusted claim equals the requested value | BLOCK | `STALE_DEPENDENCY` |
+| 4 | Requested value equals the object of a `superseded` claim whose chain head is a trusted claim, and no trusted claim has the requested value | BLOCK | `REQUESTED_VALUE_SUPERSEDED` |
+| 5 | A contested claim exists | ABSTAIN | `UNRESOLVED_CONFLICT` |
+| 6 | No trusted claims exist (only `agent`/`unknown` sources, or all tainted) | ABSTAIN | `INSUFFICIENT_TRUST` |
+| 7 | Trusted claims disagree and the top tier is not `authoritative`, or more than one distinct value exists at the top tier | ABSTAIN | `UNRESOLVED_CONFLICT` |
+| 8 | Governing value differs from the requested value | BLOCK | `REQUESTED_VALUE_CONFLICTS_CURRENT` |
+| 9 | Governing value equals the requested value | ALLOW | `MATCHES_CURRENT_EVIDENCE` |
+
+Note on rule 7: with the ingestion rules in section 3, conflicting active trusted claims should not arise through the API, so rule 7 is a defensive check. Keep it, and unit-test it with hand-built evidence structures.
 
 Every verification writes a `Decision` node with `RELIED_ON` edges to the claims it used. The response lists `evidence[]` (claim_id, role, source, tier, status) and `relationships[]` (type, from, to), all taken from query results. It also includes `remediation` (a short deterministic string, e.g. "Fetch the current value of application.deployment_target and retry").
 
-Open question for the human (decide and log in `DECISIONS.md`): should a disputed claim from an `authoritative` source block actions on that subject? Default: yes, ABSTAIN with `UNRESOLVED_CONFLICT`.
+Resolved decisions (log in `DECISIONS.md`):
+- A disputed claim from a `verified`+ source blocks actions on that subject with ABSTAIN `UNRESOLVED_CONFLICT` (rule 5), unless a strictly higher-tier trusted claim exists.
+- A low-tier source can never dispute or displace a higher-tier claim.
 
 ## 5. Blast radius (the graph-native feature)
 
@@ -140,7 +150,7 @@ Pydantic models for every request and response. Verification never executes the 
 4. **Session 3 (agent B):** tries `deploy staging`, so BLOCK `REQUESTED_VALUE_SUPERSEDED`, evidence `c1`, `c3`, edge `SUPERSEDES`.
 5. **Session 3b:** agent B tries to act on `c2` (derived, tainted), so BLOCK `STALE_DEPENDENCY`.
 6. **Session 4:** `deploy production` gives ALLOW `MATCHES_CURRENT_EVIDENCE`.
-7. Bonus beat: an `agent`-tier source claims `deployment_target = canary` with a newer timestamp and no supersession. It is recorded as `CONTRADICTS` and does not displace `c3`. A "latest wins" baseline would be fooled.
+7. Bonus beat: an `agent`-tier source claims `deployment_target = canary` with a newer timestamp and no supersession. It is recorded as `CONTRADICTS` (canary points to `c3`), only the canary claim becomes `disputed`, and `c3` stays active and keeps governing. A "latest wins" baseline would be fooled.
 
 ## 8. Evaluation
 
@@ -168,11 +178,13 @@ Use whatever the builder is fastest in (Vite + React is fine; Next.js only if al
 - Unit: normalization, policy function as a pure function over a fetched evidence structure (all 8 rules), validation.
 - Integration (real FalkorDB): ingestion idempotency, supersession accept and reject, contradiction creation, blast radius, taint detection, Decision node writes.
 - E2E: full scenario in section 7, then restart the API (and the FalkorDB container) and re-verify.
+- Contradiction tiers: lower-tier conflict disputes only the lower claim; equal-tier conflict disputes both; rejected supersession follows the same rule.
+- Supersession chain: A superseded by B superseded by C; a request for A is BLOCK `REQUESTED_VALUE_SUPERSEDED`.
 - Failure: stop or break the client and assert ABSTAIN `GRAPH_UNAVAILABLE`.
 
 ## 12. FalkorDB setup notes (verify, don't trust)
 
-- Docker image `falkordb/falkordb`, port 6379. Mount a volume for data and enable persistence (AOF/RDB via the container's args or env). Confirm the data path and flags in the current FalkorDB docs, then prove persistence with a restart test.
+- Docker image `falkordb/falkordb`, port 6379. Mount a volume for data and enable persistence (AOF/RDB via the container's args or env). Confirm the data path and flags in the current FalkorDB docs, then prove persistence with a restart test **without a manual SAVE**. Pin the server image tag and the client version separately. Keep `verify_falkordb_persistence.py` in the repo as README evidence.
 - Python: `falkordb` client. Expected pattern is `FalkorDB(host, port)`, `db.select_graph(name)`, `graph.query(cypher, params)`. Confirm against the installed version.
 - Use `MERGE` for idempotent writes and bound all variable-length paths (`*1..5`).
 

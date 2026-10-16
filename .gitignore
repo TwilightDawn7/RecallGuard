@@ -25,6 +25,7 @@ data/
 
 # Environment & IDE
 .env
+PROGRESS.md
 .idea/
 .vscode/
 *.swp
