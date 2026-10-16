@@ -1,0 +1,15 @@
+services:
+  falkordb:
+    image: falkordb/falkordb:latest
+    container_name: recallguard-falkordb
+    ports:
+      - "6379:6379"
+      - "3000:3000"
+    environment:
+      - REDIS_ARGS=--save 60 1 --appendonly yes
+    volumes:
+      - falkordb_data:/var/lib/falkordb/data
+    restart: unless-stopped
+
+volumes:
+  falkordb_data:
