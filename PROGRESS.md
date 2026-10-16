@@ -15,10 +15,10 @@ Source of Truth: `SPEC.md`
   - [x] Directory structure defined (`backend/`, `eval/`, `frontend/`)
   - [x] `.gitignore`, `.env.example`, `docker-compose.yml` created
   - [x] `PROGRESS.md` and `DECISIONS.md` established
-- [ ] **Step b: FalkorDB Docker & Persistence Proof**
-  - [ ] FalkorDB running in Docker with persistent volume (`falkordb_data:/var/lib/falkordb/data`)
-  - [ ] Verified connection via official Python client
-  - [ ] Write-restart-read test proving persistence across container restart
+- [x] **Step b: FalkorDB Docker & Persistence Proof**
+  - [x] FalkorDB running in Docker with persistent volume (`recallguard_falkordb_data:/var/lib/falkordb/data`)
+  - [x] Verified connection and unique constraint syntax via official Python client (`falkordb 1.8.0`)
+  - [x] Write-restart-read test proving persistence across container restart (`backend/tests/verify_falkordb_persistence.py`)
 - [ ] **Step c: Architecture Plan Approval**
   - [ ] ≤15-line plan covering file layout, schema, and 8 policy rules presented
   - [ ] Human approval received
